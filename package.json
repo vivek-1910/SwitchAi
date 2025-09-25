@@ -1,0 +1,18 @@
+{
+  "name": "switchai-cerebras-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lightweight Cerebras proxy server for SwitchAI mobile app (handles streaming + API key abstraction).",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "NODE_ENV=production node server.js"
+  },
+  "dependencies": {
+    "@cerebras/cerebras_cloud_sdk": "^1.50.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
