@@ -74,8 +74,9 @@ app.get('/health', (req, res) => {
 
 app.post('/cerebras/chat', async (req, res) => {
   const { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  res.setHeader('x-request-id', req._reqId || '');
   try {
-    if (!model) return res.status(400).json({ error: 'model required' });
+    if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
     const key = apiKey || process.env.CEREBRAS_API_KEY;
     const client = buildClient(key);
     const payload = {
@@ -88,20 +89,34 @@ app.post('/cerebras/chat', async (req, res) => {
     };
     const t0 = Date.now();
     log('debug','cerebras.request', { id: req._reqId, model, stream:false, temp:temperature, top_p, max_tokens });
-    const data = await client.chat.completions.create(payload);
+    let data;
+    try {
+      data = await client.chat.completions.create(payload);
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const lower = msg.toLowerCase();
+      const isModel404 = lower.includes('does not exist') || lower.includes('model_not_found');
+      if (isModel404) {
+        log('warn','cerebras.model_not_found', { id: req._reqId, model, msg });
+        return res.status(404).json({ error: { message: msg, code: 'model_not_found' } });
+      }
+      log('error','cerebras.upstream_error', { id: req._reqId, model, msg });
+      return res.status(502).json({ error: { message: msg, code: 'upstream_error' } });
+    }
     const latency_ms = Date.now() - t0;
     log('info','cerebras.response', { id: req._reqId, model, latency_ms, usage: data?.usage });
-    res.json({ ...data, latency_ms });
+    res.json({ ...data, latency_ms, request_id: req._reqId });
   } catch (e) {
-    // eslint-disable-next-line no-console
-    log('error','cerebras.error', { id: req._reqId, error: e?.message || String(e) });
-    res.status(500).json({ error: e?.message || String(e) });
+    const msg = e?.message || String(e);
+    log('error','cerebras.error', { id: req._reqId, error: msg });
+    res.status(500).json({ error: { message: msg, code: 'internal_error' } });
   }
 });
 
 app.post('/cerebras/chat/stream', async (req, res) => {
   const { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
-  if (!model) return res.status(400).json({ error: 'model required' });
+  res.setHeader('x-request-id', req._reqId || '');
+  if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
   let stream;
   try {
     const key = apiKey || process.env.CEREBRAS_API_KEY;
@@ -115,11 +130,23 @@ app.post('/cerebras/chat/stream', async (req, res) => {
       top_p
     };
     log('debug','cerebras.stream.begin', { id: req._reqId, model, temp:temperature, top_p, max_tokens });
-    stream = await client.chat.completions.create(payload);
+    try {
+      stream = await client.chat.completions.create(payload);
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const lower = msg.toLowerCase();
+      const isModel404 = lower.includes('does not exist') || lower.includes('model_not_found');
+      if (isModel404) {
+        log('warn','cerebras.stream.model_not_found', { id: req._reqId, model, msg });
+        return res.status(404).json({ error: { message: msg, code: 'model_not_found' } });
+      }
+      log('error','cerebras.stream.upstream_error', { id: req._reqId, model, msg });
+      return res.status(502).json({ error: { message: msg, code: 'upstream_error' } });
+    }
   } catch (e) {
-    // eslint-disable-next-line no-console
-    log('error','cerebras.stream.init_error', { id: req._reqId, error: e?.message || String(e) });
-    return res.status(500).json({ error: e?.message || String(e) });
+    const msg = e?.message || String(e);
+    log('error','cerebras.stream.init_error', { id: req._reqId, error: msg });
+    return res.status(500).json({ error: { message: msg, code: 'internal_error' } });
   }
   // SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
