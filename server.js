@@ -19,11 +19,11 @@
     curl -N -X POST http://localhost:5058/cerebras/chat/stream -H 'Content-Type: application/json' \
       -d '{"model":"qwen-3-coder-480b","messages":[{"role":"user","content":"Hello"}]}'
 */
+import Cerebras from '@cerebras/cerebras_cloud_sdk';
+import cors from 'cors';
+import crypto from 'crypto';
 import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
-import Cerebras from '@cerebras/cerebras_cloud_sdk';
-import crypto from 'crypto';
 
 const app = express();
 app.use(cors({ origin: '*', maxAge: 600 }));
@@ -72,8 +72,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
 });
 
+const CEREBRAS_HARD_MAX = 32768;
+function capTokens(v){
+  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 4096;
+  return Math.min(CEREBRAS_HARD_MAX, Math.max(1, Math.floor(v)));
+}
+
 app.post('/cerebras/chat', async (req, res) => {
-  const { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  max_tokens = capTokens(max_tokens);
   res.setHeader('x-request-id', req._reqId || '');
   try {
     if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
@@ -114,7 +121,8 @@ app.post('/cerebras/chat', async (req, res) => {
 });
 
 app.post('/cerebras/chat/stream', async (req, res) => {
-  const { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  max_tokens = capTokens(max_tokens);
   res.setHeader('x-request-id', req._reqId || '');
   if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
   let stream;
