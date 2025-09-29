@@ -5,24 +5,19 @@
   Endpoints:
     GET  /health                  -> { status: 'ok', ts }
     POST /cerebras/chat           -> Non-stream JSON completion
-      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey?, useCase? }
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
     POST /cerebras/chat/stream    -> Server-Sent Events streaming
-      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey?, useCase? }
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
 
   apiKey precedence: request body apiKey > process.env.CEREBRAS_API_KEY
-  
-  Dynamic Token Limits:
-    - Default (chat): max 32,768 tokens
-    - Extended (audio-analysis, pdf-analysis): max 50,000 tokens
-    - Set useCase to 'audio-analysis' or 'pdf-analysis' for extended limits
 
   Example non-stream request:
     curl -X POST http://localhost:5058/cerebras/chat -H 'Content-Type: application/json' \
       -d '{"model":"qwen-3-coder-480b","messages":[{"role":"user","content":"Hello"}]}'
 
-  Example extended tokens request:
-    curl -X POST http://localhost:5058/cerebras/chat -H 'Content-Type: application/json' \
-      -d '{"model":"qwen-3-235b-a22b-instruct-2507","messages":[...],"max_tokens":45000,"useCase":"pdf-analysis"}'
+  Example stream request:
+    curl -N -X POST http://localhost:5058/cerebras/chat/stream -H 'Content-Type: application/json' \
+      -d '{"model":"qwen-3-coder-480b","messages":[{"role":"user","content":"Hello"}]}'
 */
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
 import cors from 'cors';
@@ -77,24 +72,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
 });
 
-// Dynamic max tokens based on use case
-const DEFAULT_MAX_TOKENS = 32768;  // For general chat
-const EXTENDED_MAX_TOKENS = 50000; // For audio/PDF analysis
-const ABSOLUTE_HARD_MAX = 128000;  // Cerebras absolute limit
-
-function capTokens(v, allowExtended = false){
-  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 32768;
-  const hardMax = allowExtended ? EXTENDED_MAX_TOKENS : DEFAULT_MAX_TOKENS;
-  return Math.min(ABSOLUTE_HARD_MAX, Math.max(1, Math.floor(Math.min(v, hardMax))));
+const CEREBRAS_HARD_MAX = 32768;
+function capTokens(v){
+  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 4096;
+  return Math.min(CEREBRAS_HARD_MAX, Math.max(1, Math.floor(v)));
 }
 
 app.post('/cerebras/chat', async (req, res) => {
-  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey, useCase } = req.body || {};
-  
-  // Allow extended tokens for audio/PDF analysis use cases
-  const allowExtended = useCase === 'audio-analysis' || useCase === 'pdf-analysis';
-  max_tokens = capTokens(max_tokens, allowExtended);
-  
+  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  max_tokens = capTokens(max_tokens);
   res.setHeader('x-request-id', req._reqId || '');
   try {
     if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
@@ -135,12 +121,8 @@ app.post('/cerebras/chat', async (req, res) => {
 });
 
 app.post('/cerebras/chat/stream', async (req, res) => {
-  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey, useCase } = req.body || {};
-  
-  // Allow extended tokens for audio/PDF analysis use cases  
-  const allowExtended = useCase === 'audio-analysis' || useCase === 'pdf-analysis';
-  max_tokens = capTokens(max_tokens, allowExtended);
-  
+  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
+  max_tokens = capTokens(max_tokens);
   res.setHeader('x-request-id', req._reqId || '');
   if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
   let stream;
