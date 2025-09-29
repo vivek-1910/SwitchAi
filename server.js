@@ -72,15 +72,24 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
 });
 
-const CEREBRAS_HARD_MAX = 32768;
-function capTokens(v){
+// Dynamic max tokens based on use case
+const DEFAULT_MAX_TOKENS = 32768;  // For general chat
+const EXTENDED_MAX_TOKENS = 50000; // For audio/PDF analysis
+const ABSOLUTE_HARD_MAX = 128000;  // Cerebras absolute limit
+
+function capTokens(v, allowExtended = false){
   if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 4096;
-  return Math.min(CEREBRAS_HARD_MAX, Math.max(1, Math.floor(v)));
+  const hardMax = allowExtended ? EXTENDED_MAX_TOKENS : DEFAULT_MAX_TOKENS;
+  return Math.min(ABSOLUTE_HARD_MAX, Math.max(1, Math.floor(Math.min(v, hardMax))));
 }
 
 app.post('/cerebras/chat', async (req, res) => {
-  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
-  max_tokens = capTokens(max_tokens);
+  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey, useCase } = req.body || {};
+  
+  // Allow extended tokens for audio/PDF analysis use cases
+  const allowExtended = useCase === 'audio-analysis' || useCase === 'pdf-analysis';
+  max_tokens = capTokens(max_tokens, allowExtended);
+  
   res.setHeader('x-request-id', req._reqId || '');
   try {
     if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
@@ -121,8 +130,12 @@ app.post('/cerebras/chat', async (req, res) => {
 });
 
 app.post('/cerebras/chat/stream', async (req, res) => {
-  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey } = req.body || {};
-  max_tokens = capTokens(max_tokens);
+  let { model, messages, temperature = 0.7, top_p = 0.8, max_tokens = 8192, apiKey, useCase } = req.body || {};
+  
+  // Allow extended tokens for audio/PDF analysis use cases  
+  const allowExtended = useCase === 'audio-analysis' || useCase === 'pdf-analysis';
+  max_tokens = capTokens(max_tokens, allowExtended);
+  
   res.setHeader('x-request-id', req._reqId || '');
   if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
   let stream;
