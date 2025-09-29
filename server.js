@@ -83,7 +83,7 @@ const EXTENDED_MAX_TOKENS = 50000; // For audio/PDF analysis
 const ABSOLUTE_HARD_MAX = 128000;  // Cerebras absolute limit
 
 function capTokens(v, allowExtended = false){
-  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 4096;
+  if (typeof v !== 'number' || !isFinite(v) || v <= 0) return 32768;
   const hardMax = allowExtended ? EXTENDED_MAX_TOKENS : DEFAULT_MAX_TOKENS;
   return Math.min(ABSOLUTE_HARD_MAX, Math.max(1, Math.floor(Math.min(v, hardMax))));
 }
