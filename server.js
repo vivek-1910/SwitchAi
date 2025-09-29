@@ -5,19 +5,24 @@
   Endpoints:
     GET  /health                  -> { status: 'ok', ts }
     POST /cerebras/chat           -> Non-stream JSON completion
-      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey?, useCase? }
     POST /cerebras/chat/stream    -> Server-Sent Events streaming
-      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey?, useCase? }
 
   apiKey precedence: request body apiKey > process.env.CEREBRAS_API_KEY
+  
+  Dynamic Token Limits:
+    - Default (chat): max 32,768 tokens
+    - Extended (audio-analysis, pdf-analysis): max 50,000 tokens
+    - Set useCase to 'audio-analysis' or 'pdf-analysis' for extended limits
 
   Example non-stream request:
     curl -X POST http://localhost:5058/cerebras/chat -H 'Content-Type: application/json' \
       -d '{"model":"qwen-3-coder-480b","messages":[{"role":"user","content":"Hello"}]}'
 
-  Example stream request:
-    curl -N -X POST http://localhost:5058/cerebras/chat/stream -H 'Content-Type: application/json' \
-      -d '{"model":"qwen-3-coder-480b","messages":[{"role":"user","content":"Hello"}]}'
+  Example extended tokens request:
+    curl -X POST http://localhost:5058/cerebras/chat -H 'Content-Type: application/json' \
+      -d '{"model":"qwen-3-235b-a22b-instruct-2507","messages":[...],"max_tokens":45000,"useCase":"pdf-analysis"}'
 */
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
 import cors from 'cors';
