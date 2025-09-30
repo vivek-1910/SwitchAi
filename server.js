@@ -187,7 +187,38 @@ app.post('/cerebras/chat/stream', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5058;
+
+// Self-ping mechanism to keep Render service active
+function startSelfPing() {
+  const PING_INTERVAL = 15 * 60 * 1000; // 15 minutes
+  const pingUrl = process.env.RENDER_EXTERNAL_URL || 'https://switchai.onrender.com';
+  
+  async function selfPing() {
+    try {
+      const response = await fetch(`${pingUrl}/health`);
+      if (response.ok) {
+        log('info', 'self.ping.success', { url: pingUrl });
+      } else {
+        log('warn', 'self.ping.failed', { url: pingUrl, status: response.status });
+      }
+    } catch (error) {
+      log('warn', 'self.ping.error', { url: pingUrl, error: error.message });
+    }
+  }
+  
+  // Start pinging after 30 seconds, then every 15 minutes
+  setTimeout(() => {
+    selfPing(); // First ping
+    setInterval(selfPing, PING_INTERVAL); // Regular pings
+    log('info', 'self.ping.started', { interval: PING_INTERVAL, url: pingUrl });
+  }, 30000);
+}
+
 app.listen(PORT, () => {
-  // eslint-disable-next-line no-console
   log('info','server.start',{ port: PORT, logLevel: LOG_LEVEL });
+  
+  // Start self-ping only in production (Render) environment
+  if (process.env.RENDER_EXTERNAL_URL || process.env.NODE_ENV === 'production') {
+    startSelfPing();
+  }
 });
