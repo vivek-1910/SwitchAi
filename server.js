@@ -85,6 +85,23 @@ function normalizeMessages(raw) {
   });
 }
 
+// Collapse structured content parts (text + images) into a text-only delta summary for streaming line-by-line if provider returns object chunks
+function flattenPartsToText(content) {
+  try {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content.map(part => {
+        if (!part) return '';
+        if (typeof part === 'string') return part;
+        if (part.type === 'text' && typeof part.text === 'string') return part.text;
+        if (part.type === 'image_url') return ''; // omit image placeholders from text surface
+        return '';
+      }).join('');
+    }
+    return '';
+  } catch { return ''; }
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
 });
@@ -258,6 +275,23 @@ app.post('/mistral/chat/stream', async (req, res) => {
     const key = apiKey || process.env.MISTRAL_API_KEY;
     const client = buildMistralClient(key);
     let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+    // Transform local file image URIs to data URLs if necessary (Mistral expects remote URLs or base64). We pass through if already http(s).
+    inputs = inputs.map(msg => {
+      if (Array.isArray(msg.content)) {
+        const parts = msg.content.map(p => {
+          if (p && p.type === 'image_url' && p.image_url && typeof p.image_url.url === 'string') {
+            const u = p.image_url.url;
+            if (u.startsWith('file://')) {
+              // Cannot read file here server-side (mobile path). Drop or flag.
+              return { ...p, _omitted: true }; // Mark omitted; client should have uploaded externally.
+            }
+          }
+          return p;
+        });
+        return { ...msg, content: parts };
+      }
+      return msg;
+    });
     if (doContinue) inputs = inputs.concat([{ role: 'user', content: 'Continue.' }]);
     try {
       stream = await client.chat.stream({
@@ -300,13 +334,16 @@ app.post('/mistral/chat/stream', async (req, res) => {
     try {
       for await (const event of stream) {
         if (closed) break;
-        let delta = '';
         try {
           const choice = event?.choices?.[0];
-          delta = choice?.delta?.content || choice?.message?.content || '';
-        } catch {}
-        res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-        if (delta) chunks++;
+          let raw = choice?.delta?.content || choice?.message?.content || '';
+          // If raw is an array of parts, flatten to text
+          const deltaText = flattenPartsToText(raw);
+          res.write(`data: ${JSON.stringify({ delta: deltaText })}\n\n`);
+          if (deltaText) chunks++;
+        } catch (inner) {
+          res.write(`data: ${JSON.stringify({ error: inner?.message || String(inner) })}\n\n`);
+        }
       }
       if (!closed) res.write('data: {"done": true}\n\n');
       log('info','mistral.stream.end', { id: req._reqId, model, ms: Date.now()-started, chunks });
