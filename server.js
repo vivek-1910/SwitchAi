@@ -102,6 +102,38 @@ function flattenPartsToText(content) {
   } catch { return ''; }
 }
 
+// Transform OpenAI-style parts into Mistral expected shapes.
+// Incoming examples:
+//  { type:'text', text:'Hello' }
+//  { type:'image_url', image_url:{ url:'https://...' } }
+// Mistral vision expects either plain string (text only) OR array of blocks each with an accepted type.
+// We'll convert image_url -> { type:'document_url', documentUrl:'<url>' }
+function transformForMistralVision(messages) {
+  return messages.map(m => {
+    if (!Array.isArray(m.content)) return m; // simple string case already fine
+    const transformed = m.content.map(part => {
+      if (!part) return null;
+      if (typeof part === 'string') return { type:'text', text: part };
+      const t = String(part.type||'').toLowerCase();
+      if (t === 'text' && typeof part.text === 'string') {
+        return { type: 'text', text: part.text };
+      }
+      if (t === 'image_url' && part.image_url && typeof part.image_url.url === 'string') {
+        return { type: 'document_url', documentUrl: part.image_url.url };
+      }
+      // Unsupported part types for now: silently drop
+      return null;
+    }).filter(Boolean);
+    // If after transform we only have text parts, and exactly one, collapse back to string to satisfy strict schemas
+    if (transformed.length === 1 && transformed[0].type === 'text') {
+      return { ...m, content: transformed[0].text };
+    }
+    // If empty, fallback to empty string to avoid schema errors
+    if (!transformed.length) return { ...m, content: '' };
+    return { ...m, content: transformed };
+  });
+}
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
 });
@@ -229,7 +261,8 @@ app.post('/mistral/chat', async (req, res) => {
     if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
     const key = apiKey || process.env.MISTRAL_API_KEY;
     const client = buildMistralClient(key);
-    let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+  let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+  inputs = transformForMistralVision(inputs);
     if (doContinue) inputs = inputs.concat([{ role: 'user', content: 'Continue.' }]);
     const t0 = Date.now();
     let response;
@@ -275,6 +308,7 @@ app.post('/mistral/chat/stream', async (req, res) => {
     const key = apiKey || process.env.MISTRAL_API_KEY;
     const client = buildMistralClient(key);
     let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+    inputs = transformForMistralVision(inputs);
     // Transform local file image URIs to data URLs if necessary (Mistral expects remote URLs or base64). We pass through if already http(s).
     inputs = inputs.map(msg => {
       if (Array.isArray(msg.content)) {
