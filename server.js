@@ -23,11 +23,11 @@
       -d '{"model":"qwen-3-coder-480b","messages":[{"role":"user","content":"Hello"}]}'
 */
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
+import { Mistral } from '@mistralai/mistralai';
 import cors from 'cors';
 import crypto from 'crypto';
 import 'dotenv/config';
 import express from 'express';
-import { Mistral } from '@mistralai/mistralai';
 
 const app = express();
 app.use(cors({ origin: '*', maxAge: 600 }));
@@ -263,6 +263,12 @@ app.post('/mistral/chat', async (req, res) => {
     const client = buildMistralClient(key);
   let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
   inputs = transformForMistralVision(inputs);
+    // Mistral currently does not accept image/document multimodal inputs in this deployment.
+    // If any transformed part contains a documentUrl (from image_url), reject early with a helpful error.
+    const hasDocument = inputs.some(msg => Array.isArray(msg.content) && msg.content.some(p => p && (p.documentUrl || p.type === 'document_url')));
+    if (hasDocument) {
+      return res.status(400).json({ error: { message: 'Mistral model selected does not support images/documents in this deployment. Upload images to a supported vision model or remove attachments.', code: 'mistral_vision_unsupported' } });
+    }
     if (doContinue) inputs = inputs.concat([{ role: 'user', content: 'Continue.' }]);
     const t0 = Date.now();
     let response;
@@ -309,23 +315,11 @@ app.post('/mistral/chat/stream', async (req, res) => {
     const client = buildMistralClient(key);
     let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
     inputs = transformForMistralVision(inputs);
-    // Transform local file image URIs to data URLs if necessary (Mistral expects remote URLs or base64). We pass through if already http(s).
-    inputs = inputs.map(msg => {
-      if (Array.isArray(msg.content)) {
-        const parts = msg.content.map(p => {
-          if (p && p.type === 'image_url' && p.image_url && typeof p.image_url.url === 'string') {
-            const u = p.image_url.url;
-            if (u.startsWith('file://')) {
-              // Cannot read file here server-side (mobile path). Drop or flag.
-              return { ...p, _omitted: true }; // Mark omitted; client should have uploaded externally.
-            }
-          }
-          return p;
-        });
-        return { ...msg, content: parts };
+      // Mistral does not support vision inputs here. If any part is a documentUrl (image), reject early.
+      const hasDoc = inputs.some(msg => Array.isArray(msg.content) && msg.content.some(p => p && (p.documentUrl || p.type === 'document_url')));
+      if (hasDoc) {
+        return res.status(400).json({ error: { message: 'Mistral streaming endpoint does not accept images/documents in this deployment. Use a vision-capable model or remove attachments.', code: 'mistral_vision_unsupported' } });
       }
-      return msg;
-    });
     if (doContinue) inputs = inputs.concat([{ role: 'user', content: 'Continue.' }]);
     try {
       stream = await client.chat.stream({
