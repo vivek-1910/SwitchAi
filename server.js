@@ -27,7 +27,7 @@ import cors from 'cors';
 import crypto from 'crypto';
 import 'dotenv/config';
 import express from 'express';
-import { Mistral } from 'mistralai';
+import { Mistral } from '@mistralai/mistralai';
 
 const app = express();
 app.use(cors({ origin: '*', maxAge: 600 }));
