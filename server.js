@@ -8,6 +8,9 @@
       Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
     POST /cerebras/chat/stream    -> Server-Sent Events streaming
       Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
+    POST /mistral/chat            -> Non-stream JSON completion (Mistral)
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
+    POST /mistral/chat/stream     -> Server-Sent Events streaming (Mistral)
 
   apiKey precedence: request body apiKey > process.env.CEREBRAS_API_KEY
 
@@ -24,6 +27,7 @@ import cors from 'cors';
 import crypto from 'crypto';
 import 'dotenv/config';
 import express from 'express';
+import { Mistral } from 'mistralai';
 
 const app = express();
 app.use(cors({ origin: '*', maxAge: 600 }));
@@ -62,10 +66,23 @@ function buildClient(apiKey) {
   if (!apiKey) throw new Error('Missing Cerebras API key');
   return new Cerebras({ apiKey });
 }
+function buildMistralClient(apiKey) {
+  if (!apiKey) throw new Error('Missing Mistral API key');
+  return new Mistral({ apiKey });
+}
 
 function normalizeMessages(raw) {
   if (!Array.isArray(raw)) return [];
-  return raw.map(m => ({ role: m.role || 'user', content: m.content || '' }));
+  return raw.map(m => {
+    const role = m.role || 'user';
+    // Support either string content or already structured array (for Mistral multimodal: [{type:'text',text:'..'},{type:'image_url',image_url:{url:'...'}}])
+    if (Array.isArray(m.content)) {
+      // Light validation: ensure objects with type
+      const parts = m.content.filter(p => p && (typeof p === 'string' || typeof p.type === 'string'));
+      return { role, content: parts };
+    }
+    return { role, content: m.content || '' };
+  });
 }
 
 app.get('/health', (req, res) => {
@@ -179,6 +196,122 @@ app.post('/cerebras/chat/stream', async (req, res) => {
       log('info','cerebras.stream.end', { id: req._reqId, model, ms: Date.now()-started, chunks });
     } catch (e) {
       log('error','cerebras.stream.error', { id: req._reqId, error: e?.message || String(e), chunks });
+      if (!closed) res.write(`data: ${JSON.stringify({ error: e?.message || String(e) })}\n\n`);
+    } finally {
+      if (!closed) res.end();
+    }
+  })();
+});
+
+// ---------------------------- Mistral ROUTES (with continue/tools/instructions) ------------------------
+app.post('/mistral/chat', async (req, res) => {
+  let { model, messages, temperature = 0.7, top_p = 1, max_tokens = 2048, apiKey, instructions = '', tools = null, continue: doContinue = false } = req.body || {};
+  max_tokens = capTokens(max_tokens);
+  res.setHeader('x-request-id', req._reqId || '');
+  try {
+    if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
+    const key = apiKey || process.env.MISTRAL_API_KEY;
+    const client = buildMistralClient(key);
+    let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+    if (doContinue) inputs = inputs.concat([{ role: 'user', content: 'Continue.' }]);
+    const t0 = Date.now();
+    let response;
+    try {
+      response = await client.chat.complete({
+        model,
+        messages: inputs,
+        temperature,
+        top_p,
+        max_tokens,
+        instructions: instructions || undefined,
+        tools: Array.isArray(tools) ? tools : undefined,
+      });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const lower = msg.toLowerCase();
+      const isModel404 = lower.includes('not found') || lower.includes('model_not_found');
+      if (isModel404) {
+        log('warn','mistral.model_not_found', { id: req._reqId, model, msg });
+        return res.status(404).json({ error: { message: msg, code: 'model_not_found' } });
+      }
+      log('error','mistral.upstream_error', { id: req._reqId, model, msg });
+      return res.status(502).json({ error: { message: msg, code: 'upstream_error' } });
+    }
+    const latency_ms = Date.now() - t0;
+    const usage = response?.usage || null;
+    log('info','mistral.response', { id: req._reqId, model, latency_ms, usage });
+    res.json({ ...response, latency_ms, request_id: req._reqId });
+  } catch (e) {
+    const msg = e?.message || String(e);
+    log('error','mistral.error', { id: req._reqId, error: msg });
+    res.status(500).json({ error: { message: msg, code: 'internal_error' } });
+  }
+});
+
+app.post('/mistral/chat/stream', async (req, res) => {
+  let { model, messages, temperature = 0.7, top_p = 1, max_tokens = 2048, apiKey, instructions = '', tools = null, continue: doContinue = false } = req.body || {};
+  max_tokens = capTokens(max_tokens);
+  res.setHeader('x-request-id', req._reqId || '');
+  if (!model) return res.status(400).json({ error: { message: 'model required', code: 'model_required' } });
+  let stream;
+  try {
+    const key = apiKey || process.env.MISTRAL_API_KEY;
+    const client = buildMistralClient(key);
+    let inputs = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+    if (doContinue) inputs = inputs.concat([{ role: 'user', content: 'Continue.' }]);
+    try {
+      stream = await client.chat.stream({
+        model,
+        messages: inputs,
+        temperature,
+        top_p,
+        max_tokens,
+        instructions: instructions || undefined,
+        tools: Array.isArray(tools) ? tools : undefined,
+      });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const lower = msg.toLowerCase();
+      const isModel404 = lower.includes('not found') || lower.includes('model_not_found');
+      if (isModel404) {
+        log('warn','mistral.stream.model_not_found', { id: req._reqId, model, msg });
+        return res.status(404).json({ error: { message: msg, code: 'model_not_found' } });
+      }
+      log('error','mistral.stream.upstream_error', { id: req._reqId, model, msg });
+      return res.status(502).json({ error: { message: msg, code: 'upstream_error' } });
+    }
+  } catch (e) {
+    const msg = e?.message || String(e);
+    log('error','mistral.stream.init_error', { id: req._reqId, error: msg });
+    return res.status(500).json({ error: { message: msg, code: 'internal_error' } });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  let closed = false;
+  req.on('close', () => { closed = true; });
+
+  let chunks = 0;
+  const started = Date.now();
+  (async () => {
+    try {
+      for await (const event of stream) {
+        if (closed) break;
+        let delta = '';
+        try {
+          const choice = event?.choices?.[0];
+          delta = choice?.delta?.content || choice?.message?.content || '';
+        } catch {}
+        res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+        if (delta) chunks++;
+      }
+      if (!closed) res.write('data: {"done": true}\n\n');
+      log('info','mistral.stream.end', { id: req._reqId, model, ms: Date.now()-started, chunks });
+    } catch (e) {
+      log('error','mistral.stream.error', { id: req._reqId, error: e?.message || String(e), chunks });
       if (!closed) res.write(`data: ${JSON.stringify({ error: e?.message || String(e) })}\n\n`);
     } finally {
       if (!closed) res.end();
