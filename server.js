@@ -24,14 +24,20 @@
 */
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
 import { Mistral } from '@mistralai/mistralai';
+import compression from 'compression';
 import cors from 'cors';
 import crypto from 'crypto';
 import 'dotenv/config';
 import express from 'express';
+import monitoring from './serverMonitoring.js';
 
 const app = express();
+
+// Performance optimizations
+app.use(compression()); // Enable gzip compression
 app.use(cors({ origin: '*', maxAge: 600 }));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '2mb' })); // Use built-in JSON parser
+app.disable('x-powered-by'); // Remove Express header for security
 
 // Logging -----------------------------------------------------------
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
@@ -56,6 +62,15 @@ const durMs = Number(durNs) / 1_000_000; // now durMs is a Number
     const status = res.statusCode;
     const respSize = res.getHeader('content-length') || null;
     log('info','req.end',{ id, method, url, status, durMs, respSize });
+    
+    // Record in monitoring
+    monitoring.recordRequest({
+      endpoint: url,
+      statusCode: status,
+      responseTime: durMs,
+      error: status >= 400 ? res.statusMessage : null,
+      method,
+    });
   }
   res.on('finish', done); res.on('close', done); res.on('error', done);
   req._reqId = id; // attach for downstream use
@@ -136,6 +151,31 @@ function transformForMistralVision(messages) {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', ts: Date.now() });
+});
+
+// Server status endpoint with comprehensive metrics
+app.get('/api/status', (req, res) => {
+  try {
+    const status = monitoring.getStatus();
+    res.json({
+      status: 'ok',
+      timestamp: Date.now(),
+      ...status,
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      message: error.message,
+      timestamp: Date.now(),
+    });
+  }
+});
+
+// Simple health check for monitoring
+app.get('/api/health', (req, res) => {
+  const health = monitoring.getHealth();
+  const statusCode = health.status === 'healthy' ? 200 : health.status === 'critical' ? 503 : 200;
+  res.status(statusCode).json(health);
 });
 
 const CEREBRAS_HARD_MAX = 32768;
@@ -388,7 +428,7 @@ const PORT = process.env.PORT || 5058;
 
 // Self-ping mechanism to keep Render service active
 function startSelfPing() {
-  const PING_INTERVAL = 15 * 60 * 1000; // 15 minutes
+  const PING_INTERVAL = 5 * 60 * 1000; // 5 minutes
   const pingUrl = process.env.RENDER_EXTERNAL_URL || 'https://switchai.onrender.com';
   
   async function selfPing() {
@@ -404,7 +444,7 @@ function startSelfPing() {
     }
   }
   
-  // Start pinging after 30 seconds, then every 15 minutes
+  // Start pinging after 30 seconds, then every 5 minutes
   setTimeout(() => {
     selfPing(); // First ping
     setInterval(selfPing, PING_INTERVAL); // Regular pings
