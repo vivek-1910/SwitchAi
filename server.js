@@ -466,8 +466,10 @@ app.post('/gemini/chat', async (req, res) => {
     
     let response;
     try {
+      // Gemini SDK requires 'models/' prefix if not already present
+      const modelName = model.startsWith('models/') ? model : `models/${model}`;
       response = await client.models.generateContent({
-        model,
+        model: modelName,
         contents,
       });
     } catch (err) {
@@ -531,8 +533,10 @@ app.post('/gemini/chat/stream', async (req, res) => {
     log('debug', 'gemini.stream.begin', { id: req._reqId, model, temp: temperature, top_p, max_tokens });
     
     try {
+      // Gemini SDK requires 'models/' prefix if not already present
+      const modelName = model.startsWith('models/') ? model : `models/${model}`;
       stream = await client.models.generateContentStream({
-        model,
+        model: modelName,
         contents,
       });
     } catch (err) {
