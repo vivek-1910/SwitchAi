@@ -96,6 +96,17 @@ function buildGeminiClient(apiKey) {
   return new GoogleGenAI({ apiKey });
 }
 
+// Convert OpenAI messages to Gemini contents format
+function convertToGeminiContents(messages) {
+  const normalized = normalizeMessages(messages);
+  return normalized.map(msg => ({
+    role: msg.role === 'assistant' ? 'model' : 'user',
+    parts: [{
+      text: typeof msg.content === 'string' ? msg.content : flattenPartsToText(msg.content)
+    }]
+  }));
+}
+
 function normalizeMessages(raw) {
   if (!Array.isArray(raw)) return [];
   return raw.map(m => {
@@ -447,35 +458,26 @@ app.post('/gemini/chat', async (req, res) => {
     const key = apiKey || process.env.GEMINI_API_KEY;
     const client = buildGeminiClient(key);
     
-    // Convert OpenAI-style messages to Gemini history format
-    const history = [];
-    const normalized = normalizeMessages(messages);
-    
-    for (let i = 0; i < normalized.length - 1; i++) {
-      const msg = normalized[i];
-      history.push({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: typeof msg.content === 'string' ? msg.content : flattenPartsToText(msg.content) }],
-      });
-    }
-    
-    // Last message is the current prompt
-    const lastMsg = normalized[normalized.length - 1];
-    const prompt = typeof lastMsg.content === 'string' ? lastMsg.content : flattenPartsToText(lastMsg.content);
-    
-    const chat = client.chats.create({
-      model,
-      history,
-    });
+    // Convert OpenAI-style messages to Gemini contents format
+    const contents = convertToGeminiContents(messages);
     
     const t0 = Date.now();
     log('debug', 'gemini.request', { id: req._reqId, model, stream: false, temp: temperature, top_p, max_tokens });
     
     let response;
     try {
-      response = await chat.sendMessage({ message: prompt });
+      response = await client.models.generateContent({
+        model,
+        contents,
+      });
     } catch (err) {
       const msg = err?.message || String(err);
+      const lower = msg.toLowerCase();
+      const isModel404 = lower.includes('not found') || lower.includes('model_not_found') || lower.includes('does not exist');
+      if (isModel404) {
+        log('warn', 'gemini.model_not_found', { id: req._reqId, model, msg });
+        return res.status(404).json({ error: { message: msg, code: 'model_not_found' } });
+      }
       log('error', 'gemini.upstream_error', { id: req._reqId, model, msg });
       return res.status(502).json({ error: { message: msg, code: 'upstream_error' } });
     }
@@ -518,33 +520,32 @@ app.post('/gemini/chat/stream', async (req, res) => {
     return res.status(400).json({ error: { message: 'messages array required', code: 'messages_required' } });
   }
   
-  let chat;
+  let stream;
   try {
     const key = apiKey || process.env.GEMINI_API_KEY;
     const client = buildGeminiClient(key);
     
-    // Convert OpenAI-style messages to Gemini history format
-    const history = [];
-    const normalized = normalizeMessages(messages);
-    
-    for (let i = 0; i < normalized.length - 1; i++) {
-      const msg = normalized[i];
-      history.push({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: typeof msg.content === 'string' ? msg.content : flattenPartsToText(msg.content) }],
-      });
-    }
-    
-    // Last message is the current prompt
-    const lastMsg = normalized[normalized.length - 1];
-    const prompt = typeof lastMsg.content === 'string' ? lastMsg.content : flattenPartsToText(lastMsg.content);
-    
-    chat = client.chats.create({
-      model,
-      history,
-    });
+    // Convert OpenAI-style messages to Gemini contents format
+    const contents = convertToGeminiContents(messages);
     
     log('debug', 'gemini.stream.begin', { id: req._reqId, model, temp: temperature, top_p, max_tokens });
+    
+    try {
+      stream = await client.models.generateContentStream({
+        model,
+        contents,
+      });
+    } catch (err) {
+      const msg = err?.message || String(err);
+      const lower = msg.toLowerCase();
+      const isModel404 = lower.includes('not found') || lower.includes('model_not_found') || lower.includes('does not exist');
+      if (isModel404) {
+        log('warn', 'gemini.stream.model_not_found', { id: req._reqId, model, msg });
+        return res.status(404).json({ error: { message: msg, code: 'model_not_found' } });
+      }
+      log('error', 'gemini.stream.upstream_error', { id: req._reqId, model, msg });
+      return res.status(502).json({ error: { message: msg, code: 'upstream_error' } });
+    }
   } catch (e) {
     const msg = e?.message || String(e);
     log('error', 'gemini.stream.init_error', { id: req._reqId, error: msg });
@@ -565,12 +566,7 @@ app.post('/gemini/chat/stream', async (req, res) => {
   
   (async () => {
     try {
-      const lastMsg = normalizeMessages(messages)[messages.length - 1];
-      const prompt = typeof lastMsg.content === 'string' ? lastMsg.content : flattenPartsToText(lastMsg.content);
-      
-      const response = await chat.sendMessage({ message: prompt, stream: true });
-      
-      for await (const chunk of response.stream) {
+      for await (const chunk of stream) {
         if (closed) break;
         const delta = chunk?.text || '';
         if (delta) {
