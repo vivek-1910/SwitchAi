@@ -96,15 +96,48 @@ function buildGeminiClient(apiKey) {
   return new GoogleGenAI({ apiKey });
 }
 
-// Convert OpenAI messages to Gemini contents format
+// Convert OpenAI messages to Gemini contents format (supports text + images)
 function convertToGeminiContents(messages) {
   const normalized = normalizeMessages(messages);
-  return normalized.map(msg => ({
-    role: msg.role === 'assistant' ? 'model' : 'user',
-    parts: [{
-      text: typeof msg.content === 'string' ? msg.content : flattenPartsToText(msg.content)
-    }]
-  }));
+  return normalized.map(msg => {
+    const role = msg.role === 'assistant' ? 'model' : 'user';
+    
+    // Handle string content (text-only)
+    if (typeof msg.content === 'string') {
+      return { role, parts: [{ text: msg.content }] };
+    }
+    
+    // Handle array content (multimodal: text + images)
+    if (Array.isArray(msg.content)) {
+      const parts = [];
+      for (const part of msg.content) {
+        if (typeof part === 'string') {
+          parts.push({ text: part });
+        } else if (part.type === 'text') {
+          parts.push({ text: part.text || '' });
+        } else if (part.type === 'image_url') {
+          // Convert OpenAI image_url format to Gemini inlineData format
+          const imageUrl = part.image_url?.url || part.image_url;
+          if (imageUrl && imageUrl.startsWith('data:')) {
+            // Extract base64 data and mime type from data URL
+            const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+              parts.push({
+                inlineData: {
+                  mimeType: match[1],
+                  data: match[2]
+                }
+              });
+            }
+          }
+        }
+      }
+      return { role, parts: parts.length > 0 ? parts : [{ text: '' }] };
+    }
+    
+    // Fallback
+    return { role, parts: [{ text: String(msg.content || '') }] };
+  });
 }
 
 function normalizeMessages(raw) {
