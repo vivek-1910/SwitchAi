@@ -593,6 +593,7 @@ app.post('/gemini/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
   res.flushHeaders?.();
   
   let closed = false;
@@ -608,15 +609,23 @@ app.post('/gemini/chat/stream', async (req, res) => {
         const delta = chunk?.text || '';
         if (delta) {
           res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+          // Force flush to client immediately
+          if (res.flush) res.flush();
           chunks++;
         }
       }
       
-      if (!closed) res.write('data: {"done": true}\n\n');
+      if (!closed) {
+        res.write('data: {"done": true}\n\n');
+        if (res.flush) res.flush();
+      }
       log('info', 'gemini.stream.end', { id: req._reqId, model, ms: Date.now() - started, chunks });
     } catch (e) {
       log('error', 'gemini.stream.error', { id: req._reqId, error: e?.message || String(e), chunks });
-      if (!closed) res.write(`data: ${JSON.stringify({ error: e?.message || String(e) })}\n\n`);
+      if (!closed) {
+        res.write(`data: ${JSON.stringify({ error: e?.message || String(e) })}\n\n`);
+        if (res.flush) res.flush();
+      }
     } finally {
       if (!closed) res.end();
     }
