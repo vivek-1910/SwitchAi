@@ -12,12 +12,11 @@
       Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
     POST /mistral/chat/stream     -> Server-Sent Events streaming (Mistral)
     POST /gemini/chat             -> Non-stream JSON completion (Gemini)
-      Body: { model, messages, temperature?, top_p?, max_tokens? }
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
     POST /gemini/chat/stream      -> Server-Sent Events streaming (Gemini)
-      Body: { model, messages, temperature?, top_p?, max_tokens? }
+      Body: { model, messages, temperature?, top_p?, max_tokens?, apiKey? }
 
-  apiKey precedence: request body apiKey > process.env.CEREBRAS_API_KEY
-  Gemini API key fetched from Firebase: inference/google
+  apiKey precedence: request body apiKey > process.env.{PROVIDER}_API_KEY
 
   Example non-stream request:
     curl -X POST http://localhost:5058/cerebras/chat -H 'Content-Type: application/json' \
@@ -30,7 +29,6 @@
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
 import { Mistral } from '@mistralai/mistralai';
 import { GoogleGenAI } from '@google/genai';
-import admin from 'firebase-admin';
 import compression from 'compression';
 import cors from 'cors';
 import crypto from 'crypto';
@@ -39,19 +37,6 @@ import express from 'express';
 import monitoring from './serverMonitoring.js';
 
 const app = express();
-
-// Initialize Firebase Admin
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert({
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    }),
-    databaseURL: process.env.FIREBASE_DATABASE_URL,
-  });
-}
-const db = admin.firestore();
 
 // Performance optimizations
 app.use(compression()); // Enable gzip compression
@@ -104,34 +89,6 @@ function buildClient(apiKey) {
 function buildMistralClient(apiKey) {
   if (!apiKey) throw new Error('Missing Mistral API key');
   return new Mistral({ apiKey });
-}
-
-// Gemini API key cache
-let geminiApiKeyCache = null;
-let geminiApiKeyCacheTime = 0;
-const GEMINI_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-async function getGeminiApiKey() {
-  const now = Date.now();
-  if (geminiApiKeyCache && (now - geminiApiKeyCacheTime) < GEMINI_CACHE_TTL) {
-    return geminiApiKeyCache;
-  }
-  try {
-    const doc = await db.collection('inference').doc('google').get();
-    if (!doc.exists) {
-      throw new Error('Gemini API key not found in Firebase (inference/google)');
-    }
-    const key = doc.data()?.key;
-    if (!key) {
-      throw new Error('Gemini API key is empty in Firebase');
-    }
-    geminiApiKeyCache = key;
-    geminiApiKeyCacheTime = now;
-    return key;
-  } catch (error) {
-    log('error', 'gemini.key.fetch_error', { error: error.message });
-    throw error;
-  }
 }
 
 function buildGeminiClient(apiKey) {
@@ -479,7 +436,7 @@ app.post('/mistral/chat/stream', async (req, res) => {
 
 // ---------------------------- Gemini ROUTES ------------------------
 app.post('/gemini/chat', async (req, res) => {
-  let { model = 'gemini-2.5-flash', messages, temperature = 0.7, top_p = 0.95, max_tokens = 8192 } = req.body || {};
+  let { model = 'gemini-2.5-flash', messages, temperature = 0.7, top_p = 0.95, max_tokens = 8192, apiKey } = req.body || {};
   max_tokens = capTokens(max_tokens);
   res.setHeader('x-request-id', req._reqId || '');
   try {
@@ -487,8 +444,8 @@ app.post('/gemini/chat', async (req, res) => {
       return res.status(400).json({ error: { message: 'messages array required', code: 'messages_required' } });
     }
     
-    const apiKey = await getGeminiApiKey();
-    const client = buildGeminiClient(apiKey);
+    const key = apiKey || process.env.GEMINI_API_KEY;
+    const client = buildGeminiClient(key);
     
     // Convert OpenAI-style messages to Gemini history format
     const history = [];
@@ -553,7 +510,7 @@ app.post('/gemini/chat', async (req, res) => {
 });
 
 app.post('/gemini/chat/stream', async (req, res) => {
-  let { model = 'gemini-2.5-flash', messages, temperature = 0.7, top_p = 0.95, max_tokens = 8192 } = req.body || {};
+  let { model = 'gemini-2.5-flash', messages, temperature = 0.7, top_p = 0.95, max_tokens = 8192, apiKey } = req.body || {};
   max_tokens = capTokens(max_tokens);
   res.setHeader('x-request-id', req._reqId || '');
   
@@ -563,8 +520,8 @@ app.post('/gemini/chat/stream', async (req, res) => {
   
   let chat;
   try {
-    const apiKey = await getGeminiApiKey();
-    const client = buildGeminiClient(apiKey);
+    const key = apiKey || process.env.GEMINI_API_KEY;
+    const client = buildGeminiClient(key);
     
     // Convert OpenAI-style messages to Gemini history format
     const history = [];
