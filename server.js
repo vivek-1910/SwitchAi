@@ -545,6 +545,18 @@ app.post('/gemini/chat', async (req, res) => {
       hasGenerationConfig: !!generationConfig
     });
     
+    // Warn if using wrong model for image generation
+    if (!isImageModel && messages?.some(m => {
+      const content = String(m?.content || '');
+      return /\b(generat|creat|mak|draw)(e|ing)?\s+(an?\\s+)?(image|picture|photo)/i.test(content);
+    })) {
+      log('warn', 'gemini.wrong_model_for_images', { 
+        id: req._reqId, 
+        model,
+        suggestion: 'Use gemini-2.5-flash-image for image generation'
+      });
+    }
+    
     let response;
     try {
       // Gemini SDK requires 'models/' prefix if not already present
@@ -662,6 +674,18 @@ app.post('/gemini/chat/stream', async (req, res) => {
       isImageModel,
       hasGenerationConfig: !!generationConfig
     });
+    
+    // Warn if using wrong model for image generation
+    if (!isImageModel && messages?.some(m => {
+      const content = String(m?.content || '');
+      return /\b(generat|creat|mak|draw)(e|ing)?\s+(an?\\s+)?(image|picture|photo)/i.test(content);
+    })) {
+      log('warn', 'gemini.stream.wrong_model_for_images', { 
+        id: req._reqId, 
+        model,
+        suggestion: 'Use gemini-2.5-flash-image for image generation'
+      });
+    }
     
     try {
       // Gemini SDK requires 'models/' prefix if not already present
