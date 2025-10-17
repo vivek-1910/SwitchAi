@@ -527,17 +527,28 @@ app.post('/gemini/chat', async (req, res) => {
     const contents = convertToGeminiContents(messages);
     
     const t0 = Date.now();
-    log('debug', 'gemini.request', { id: req._reqId, model, stream: false, temp: temperature, top_p, max_tokens });
+    
+    // Add image generation config for Nano Banana models
+    const isImageModel = model.includes('flash-image') || model.includes('2.5-flash-image');
+    const generationConfig = isImageModel ? {
+      responseModalities: ['IMAGE', 'TEXT'],
+    } : undefined;
+    
+    log('debug', 'gemini.request', { 
+      id: req._reqId, 
+      model, 
+      stream: false, 
+      temp: temperature, 
+      top_p, 
+      max_tokens,
+      isImageModel,
+      hasGenerationConfig: !!generationConfig
+    });
     
     let response;
     try {
       // Gemini SDK requires 'models/' prefix if not already present
       const modelName = model.startsWith('models/') ? model : `models/${model}`;
-      
-      // Add image generation config for Nano Banana models
-      const generationConfig = model.includes('flash-image') ? {
-        responseModalities: ['IMAGE', 'TEXT'],
-      } : undefined;
       
       response = await client.models.generateContent({
         model: modelName,
@@ -636,16 +647,25 @@ app.post('/gemini/chat/stream', async (req, res) => {
     // Convert OpenAI-style messages to Gemini contents format
     const contents = convertToGeminiContents(messages);
     
-    log('debug', 'gemini.stream.begin', { id: req._reqId, model, temp: temperature, top_p, max_tokens });
+    // Add image generation config for Nano Banana models
+    const isImageModel = model.includes('flash-image') || model.includes('2.5-flash-image');
+    const generationConfig = isImageModel ? {
+      responseModalities: ['IMAGE', 'TEXT'],
+    } : undefined;
+    
+    log('debug', 'gemini.stream.begin', { 
+      id: req._reqId, 
+      model, 
+      temp: temperature, 
+      top_p, 
+      max_tokens,
+      isImageModel,
+      hasGenerationConfig: !!generationConfig
+    });
     
     try {
       // Gemini SDK requires 'models/' prefix if not already present
       const modelName = model.startsWith('models/') ? model : `models/${model}`;
-      
-      // Add image generation config for Nano Banana models
-      const generationConfig = model.includes('flash-image') ? {
-        responseModalities: ['IMAGE', 'TEXT'],
-      } : undefined;
       
       stream = await client.models.generateContentStream({
         model: modelName,
