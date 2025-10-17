@@ -533,9 +533,16 @@ app.post('/gemini/chat', async (req, res) => {
     try {
       // Gemini SDK requires 'models/' prefix if not already present
       const modelName = model.startsWith('models/') ? model : `models/${model}`;
+      
+      // Add image generation config for Nano Banana models
+      const generationConfig = model.includes('flash-image') ? {
+        responseModalities: ['IMAGE', 'TEXT'],
+      } : undefined;
+      
       response = await client.models.generateContent({
         model: modelName,
         contents,
+        ...(generationConfig && { generationConfig }),
       });
     } catch (err) {
       const msg = err?.message || String(err);
@@ -634,9 +641,16 @@ app.post('/gemini/chat/stream', async (req, res) => {
     try {
       // Gemini SDK requires 'models/' prefix if not already present
       const modelName = model.startsWith('models/') ? model : `models/${model}`;
+      
+      // Add image generation config for Nano Banana models
+      const generationConfig = model.includes('flash-image') ? {
+        responseModalities: ['IMAGE', 'TEXT'],
+      } : undefined;
+      
       stream = await client.models.generateContentStream({
         model: modelName,
         contents,
+        ...(generationConfig && { generationConfig }),
       });
     } catch (err) {
       const msg = err?.message || String(err);
