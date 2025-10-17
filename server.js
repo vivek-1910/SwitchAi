@@ -29,7 +29,6 @@
 import Cerebras from '@cerebras/cerebras_cloud_sdk';
 import { Mistral } from '@mistralai/mistralai';
 import { GoogleGenAI } from '@google/genai';
-import compression from 'compression';
 import cors from 'cors';
 import crypto from 'crypto';
 import 'dotenv/config';
@@ -39,11 +38,11 @@ import monitoring from './serverMonitoring.js';
 const app = express();
 
 // Performance optimizations
-app.use(compression({ level: 1, threshold: 0 })); // Fast compression, compress everything
-app.use(cors({ origin: '*', maxAge: 3600 })); // Cache CORS preflight for 1 hour
+app.use(cors({ origin: '*', maxAge: 3600, credentials: false })); // Cache CORS preflight for 1 hour
 app.use(express.json({ limit: '2mb' })); // Use built-in JSON parser
 app.disable('x-powered-by'); // Remove Express header for security
 app.disable('etag'); // Disable ETag generation for speed
+app.set('json spaces', 0); // Compact JSON
 
 // Logging -----------------------------------------------------------
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
@@ -54,34 +53,32 @@ function log(l, msg, meta){ if(!shouldLog(l)) return; const ts=new Date().toISOS
 // Request/response logging middleware - optimized for production
 const ENABLE_REQUEST_LOGGING = process.env.ENABLE_REQUEST_LOGGING === 'true';
 app.use((req,res,next)=>{
-  if (!ENABLE_REQUEST_LOGGING) return next();
   const id = crypto.randomUUID();
+  req._reqId = id;
+  if (!ENABLE_REQUEST_LOGGING) return next();
   const start = process.hrtime.bigint();
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  const method = req.method;
-  const url = req.originalUrl || req.url;
-  const reqSize = Number(req.headers['content-length']||0);
-  log('info','req.begin',{ id, method, url, ip, reqSize });
+  setImmediate(() => {
+    const method = req.method;
+    const url = req.originalUrl || req.url;
+    log('info','req.begin',{ id, method, url });
+  });
   let finished = false;
   function done(){
     if(finished) return; finished = true;
-    const durNs = Number(process.hrtime.bigint() - start);
-const durMs = Number(durNs) / 1_000_000; // now durMs is a Number
-    const status = res.statusCode;
-    const respSize = res.getHeader('content-length') || null;
-    log('info','req.end',{ id, method, url, status, durMs, respSize });
-    
-    // Record in monitoring
-    monitoring.recordRequest({
-      endpoint: url,
-      statusCode: status,
-      responseTime: durMs,
-      error: status >= 400 ? res.statusMessage : null,
-      method,
+    setImmediate(() => {
+      const durMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+      const status = res.statusCode;
+      log('info','req.end',{ id, method: req.method, url: req.originalUrl || req.url, status, durMs });
+      monitoring.recordRequest({
+        endpoint: req.originalUrl || req.url,
+        statusCode: status,
+        responseTime: durMs,
+        error: status >= 400 ? res.statusMessage : null,
+        method: req.method,
+      });
     });
   }
-  res.on('finish', done); res.on('close', done); res.on('error', done);
-  req._reqId = id; // attach for downstream use
+  res.on('finish', done); res.on('close', done);
   next();
 });
 
@@ -319,12 +316,13 @@ app.post('/cerebras/chat/stream', async (req, res) => {
     log('error','cerebras.stream.init_error', { id: req._reqId, error: msg });
     return res.status(500).json({ error: { message: msg, code: 'internal_error' } });
   }
-  // SSE headers
+  // SSE headers - optimized for instant streaming
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable proxy buffering
-  res.flushHeaders?.();
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.flushHeaders();
 
   let closed = false;
   req.on('close', () => { closed = true; });
@@ -337,7 +335,7 @@ app.post('/cerebras/chat/stream', async (req, res) => {
         if (closed) break;
         const delta = chunk?.choices?.[0]?.delta?.content || '';
         if (delta) {
-          res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+          res.write(`data: {"delta":${JSON.stringify(delta)}}\n\n`);
           chunks++;
         }
       }
@@ -451,8 +449,9 @@ app.post('/mistral/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable proxy buffering
-  res.flushHeaders?.();
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.flushHeaders();
 
   let closed = false;
   req.on('close', () => { closed = true; });
@@ -481,7 +480,7 @@ app.post('/mistral/chat/stream', async (req, res) => {
           
           // Only write if we have actual content
           if (deltaText) {
-            res.write(`data: ${JSON.stringify({ delta: deltaText })}\n\n`);
+            res.write(`data: {"delta":${JSON.stringify(deltaText)}}\n\n`);
             chunks++;
           }
         } catch (inner) {
@@ -614,8 +613,9 @@ app.post('/gemini/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
-  res.flushHeaders?.();
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.flushHeaders();
   
   let closed = false;
   req.on('close', () => { closed = true; });
@@ -629,7 +629,7 @@ app.post('/gemini/chat/stream', async (req, res) => {
         if (closed) break;
         const delta = chunk?.text || '';
         if (delta) {
-          res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+          res.write(`data: {"delta":${JSON.stringify(delta)}}\n\n`);
           chunks++;
         }
       }
