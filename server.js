@@ -55,28 +55,40 @@ const ENABLE_REQUEST_LOGGING = process.env.ENABLE_REQUEST_LOGGING === 'true';
 app.use((req,res,next)=>{
   const id = crypto.randomUUID();
   req._reqId = id;
-  if (!ENABLE_REQUEST_LOGGING) return next();
   const start = process.hrtime.bigint();
-  setImmediate(() => {
-    const method = req.method;
-    const url = req.originalUrl || req.url;
-    log('info','req.begin',{ id, method, url });
-  });
+  
+  // Log request start asynchronously if logging enabled
+  if (ENABLE_REQUEST_LOGGING) {
+    setImmediate(() => {
+      const method = req.method;
+      const url = req.originalUrl || req.url;
+      log('info','req.begin',{ id, method, url });
+    });
+  }
+  
   let finished = false;
   function done(){
     if(finished) return; finished = true;
-    setImmediate(() => {
-      const durMs = Number(process.hrtime.bigint() - start) / 1_000_000;
-      const status = res.statusCode;
-      log('info','req.end',{ id, method: req.method, url: req.originalUrl || req.url, status, durMs });
-      monitoring.recordRequest({
-        endpoint: req.originalUrl || req.url,
-        statusCode: status,
-        responseTime: durMs,
-        error: status >= 400 ? res.statusMessage : null,
-        method: req.method,
-      });
+    const durMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+    const status = res.statusCode;
+    const endpoint = req.originalUrl || req.url;
+    const method = req.method;
+    
+    // Record monitoring immediately (not deferred)
+    monitoring.recordRequest({
+      endpoint,
+      statusCode: status,
+      responseTime: durMs,
+      error: status >= 400 ? res.statusMessage : null,
+      method,
     });
+    
+    // Log asynchronously if logging enabled
+    if (ENABLE_REQUEST_LOGGING) {
+      setImmediate(() => {
+        log('info','req.end',{ id, method, url: endpoint, status, durMs });
+      });
+    }
   }
   res.on('finish', done); res.on('close', done);
   next();
