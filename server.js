@@ -461,21 +461,35 @@ app.post('/mistral/chat/stream', async (req, res) => {
   const started = Date.now();
   (async () => {
     try {
+      let eventCount = 0;
       for await (const event of stream) {
         if (closed) break;
+        eventCount++;
+        
+        // Debug: log first event structure
+        if (eventCount === 1) {
+          log('debug','mistral.stream.first_event', { id: req._reqId, model, eventKeys: Object.keys(event || {}) });
+        }
+        
         try {
-          const choice = event?.choices?.[0];
-          let raw = choice?.delta?.content || choice?.message?.content || '';
+          // Mistral SDK returns different structures - check both data and choices
+          const choice = event?.data?.choices?.[0] || event?.choices?.[0];
+          let raw = choice?.delta?.content || choice?.message?.content || event?.data?.delta?.content || '';
+          
           // If raw is an array of parts, flatten to text
           const deltaText = flattenPartsToText(raw);
-          res.write(`data: ${JSON.stringify({ delta: deltaText })}\n\n`);
-          if (deltaText) chunks++;
+          
+          // Only write if we have actual content
+          if (deltaText) {
+            res.write(`data: ${JSON.stringify({ delta: deltaText })}\n\n`);
+            chunks++;
+          }
         } catch (inner) {
-          res.write(`data: ${JSON.stringify({ error: inner?.message || String(inner) })}\n\n`);
+          log('error','mistral.stream.parse_error', { id: req._reqId, error: inner?.message || String(inner) });
         }
       }
       if (!closed) res.write('data: {"done": true}\n\n');
-      log('info','mistral.stream.end', { id: req._reqId, model, ms: Date.now()-started, chunks });
+      log('info','mistral.stream.end', { id: req._reqId, model, ms: Date.now()-started, chunks, totalEvents: eventCount });
     } catch (e) {
       log('error','mistral.stream.error', { id: req._reqId, error: e?.message || String(e), chunks });
       if (!closed) res.write(`data: ${JSON.stringify({ error: e?.message || String(e) })}\n\n`);
