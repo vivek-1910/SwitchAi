@@ -39,10 +39,11 @@ import monitoring from './serverMonitoring.js';
 const app = express();
 
 // Performance optimizations
-app.use(compression()); // Enable gzip compression
-app.use(cors({ origin: '*', maxAge: 600 }));
+app.use(compression({ level: 1, threshold: 0 })); // Fast compression, compress everything
+app.use(cors({ origin: '*', maxAge: 3600 })); // Cache CORS preflight for 1 hour
 app.use(express.json({ limit: '2mb' })); // Use built-in JSON parser
 app.disable('x-powered-by'); // Remove Express header for security
+app.disable('etag'); // Disable ETag generation for speed
 
 // Logging -----------------------------------------------------------
 const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
@@ -50,8 +51,10 @@ const levels = ['error','warn','info','debug'];
 function shouldLog(l){ return levels.indexOf(l) <= levels.indexOf(LOG_LEVEL); }
 function log(l, msg, meta){ if(!shouldLog(l)) return; const ts=new Date().toISOString(); try{ console.log(JSON.stringify({ ts, level:l, msg, ...(meta||{}) })); } catch { console.log(ts,l,msg,meta||''); } }
 
-// Request/response logging middleware
+// Request/response logging middleware - optimized for production
+const ENABLE_REQUEST_LOGGING = process.env.ENABLE_REQUEST_LOGGING === 'true';
 app.use((req,res,next)=>{
+  if (!ENABLE_REQUEST_LOGGING) return next();
   const id = crypto.randomUUID();
   const start = process.hrtime.bigint();
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -320,6 +323,7 @@ app.post('/cerebras/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable proxy buffering
   res.flushHeaders?.();
 
   let closed = false;
@@ -332,8 +336,10 @@ app.post('/cerebras/chat/stream', async (req, res) => {
       for await (const chunk of stream) {
         if (closed) break;
         const delta = chunk?.choices?.[0]?.delta?.content || '';
-        res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-        if (delta) chunks++;
+        if (delta) {
+          res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+          chunks++;
+        }
       }
       if (!closed) res.write('data: {"done": true}\n\n');
       log('info','cerebras.stream.end', { id: req._reqId, model, ms: Date.now()-started, chunks });
@@ -445,6 +451,7 @@ app.post('/mistral/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // Disable proxy buffering
   res.flushHeaders?.();
 
   let closed = false;
@@ -609,22 +616,18 @@ app.post('/gemini/chat/stream', async (req, res) => {
         const delta = chunk?.text || '';
         if (delta) {
           res.write(`data: ${JSON.stringify({ delta })}\n\n`);
-          // Force flush to client immediately
-          if (res.flush) res.flush();
           chunks++;
         }
       }
       
       if (!closed) {
         res.write('data: {"done": true}\n\n');
-        if (res.flush) res.flush();
       }
       log('info', 'gemini.stream.end', { id: req._reqId, model, ms: Date.now() - started, chunks });
     } catch (e) {
       log('error', 'gemini.stream.error', { id: req._reqId, error: e?.message || String(e), chunks });
       if (!closed) {
         res.write(`data: ${JSON.stringify({ error: e?.message || String(e) })}\n\n`);
-        if (res.flush) res.flush();
       }
     } finally {
       if (!closed) res.end();
